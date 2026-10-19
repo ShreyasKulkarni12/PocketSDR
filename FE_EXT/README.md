@@ -72,11 +72,12 @@ rising edge, rebuild with `CLK_POL` = 1 (falling edge) in `fe_ext_fw.c`.
 Boot EEPROM: C2 boot needs I2C EEPROM at address 0x51 with 2-byte addressing
 (24C32 .. 24C512, e.g. 24C128 on common CY7C68013A boards). 24C02 too small.
 
-CY3684 DVK board: set EEPROM SELECT switch to LARGE (24LC128). EEPROM ENABLE
-switch OFF at power-up gives blank boot (`04B4:8613`) for recovery; switch ON
-before writing. All needed FX2LP pins are on the DVK headers, see DVK user
-guide pin tables. Check DVK jumpers so no on-board part drives PB, PA2/4/5/6,
-RDY0/1 or IFCLK.
+Blue CY7C68013A-56 mini board (LCSoft type, 24 MHz crystal, 8-pin EEPROM,
+EEPROM jumper): all needed pins are on the two 2.54 mm headers, labelled
+IFCLK, RDY0, RDY1, PA2, PA4, PA5, PA6, PB0-PB7. Use IFCLK, not CLK (CLKOUT).
+Read EEPROM marking: 24C128 or 24C64/24C32 OK, 24C02 must be replaced.
+EEPROM jumper off at power-up gives blank boot (`04B4:8613`) for recovery;
+put jumper back before writing EEPROM.
 
 --------------------------------------------------------------------------------
 
