@@ -19,6 +19,8 @@
 //
 //  Sampling runs only while ADC CLK is applied to IFCLK.
 //
+//  Build: SDCC + libfx2 (https://github.com/whitequark/libfx2), see Makefile.
+//
 //  References:
 //
 //  [1] Cypress, EZ-USB Technical Refrence Manual, Rev.G , January 31, 2019
@@ -26,11 +28,10 @@
 //  History:
 //  2026-10-19  1.0  new, derived from FE_2CH/FW/v2.1/pocket_fw.c
 //
-#pragma NOIV
-
-#include "Fx2.h"
-#include "fx2regs.h"
-#include "fx2sdly.h"
+#include <fx2lib.h>
+#include <fx2regs.h>
+#include <fx2delay.h>
+#include <fx2usb.h>
 
 // constants and macros -------------------------------------------------------
 #define VER_FW       0x01       // Firmware version
@@ -44,55 +45,119 @@
 #define VR_STAT      0x40       // USB vendor request: Get device info and status
 #define VR_START     0x44       // USB vendor request: Start bulk transfer
 #define VR_STOP      0x45       // USB vendor request: Stop bulk transfer
-#define VR_RESET     0x46       // USB vendor request: Reset device
+#define VR_RESET     0x46       // USB vendor request: Reset FIFO and restart
 
-// type defintions -------------------------------------------------------------
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
+// USB descriptors -------------------------------------------------------------
+usb_desc_device_c usb_device = {
+  .bLength            = sizeof(struct usb_desc_device),
+  .bDescriptorType    = USB_DESC_DEVICE,
+  .bcdUSB             = 0x0200,
+  .bDeviceClass       = USB_DEV_CLASS_PER_INTERFACE,
+  .bDeviceSubClass    = USB_DEV_SUBCLASS_PER_INTERFACE,
+  .bDeviceProtocol    = USB_DEV_PROTOCOL_PER_INTERFACE,
+  .bMaxPacketSize0    = 64,
+  .idVendor           = 0x04B4,
+  .idProduct          = 0x1004,
+  .bcdDevice          = VER_FW,
+  .iManufacturer      = 1,
+  .iProduct           = 2,
+  .iSerialNumber      = 0,
+  .bNumConfigurations = 1,
+};
 
-static uint8_t bulk_on = 0;     // Bulk transfer status (0:stop,1:start)
+usb_desc_interface_c usb_iface = {
+  .bLength            = sizeof(struct usb_desc_interface),
+  .bDescriptorType    = USB_DESC_INTERFACE,
+  .bInterfaceNumber   = 0,
+  .bAlternateSetting  = 0,
+  .bNumEndpoints      = 1,
+  .bInterfaceClass    = USB_IFACE_CLASS_VENDOR,
+  .bInterfaceSubClass = USB_IFACE_SUBCLASS_VENDOR,
+  .bInterfaceProtocol = USB_IFACE_PROTOCOL_VENDOR,
+  .iInterface         = 0,
+};
+
+usb_desc_endpoint_c usb_ep6_in = {
+  .bLength            = sizeof(struct usb_desc_endpoint),
+  .bDescriptorType    = USB_DESC_ENDPOINT,
+  .bEndpointAddress   = 6 | USB_DIR_IN,
+  .bmAttributes       = USB_XFER_BULK,
+  .wMaxPacketSize     = 512,
+  .bInterval          = 0,
+};
+
+usb_configuration_c usb_config = {
+  {
+    .bLength             = sizeof(struct usb_desc_configuration),
+    .bDescriptorType     = USB_DESC_CONFIGURATION,
+    .bNumInterfaces      = 1,
+    .bConfigurationValue = 1,
+    .iConfiguration      = 0,
+    .bmAttributes        = USB_ATTR_RESERVED_1,
+    .bMaxPower           = 50,
+  },
+  {
+    { .interface = &usb_iface },
+    { .endpoint  = &usb_ep6_in },
+    { 0 }
+  }
+};
+
+usb_configuration_set_c usb_configs[] = {
+  &usb_config,
+};
+
+usb_ascii_string_c usb_strings[] = {
+  [0] = "Pocket SDR",
+  [1] = "Pocket SDR FE EXT",
+};
+
+usb_descriptor_set_c usb_descriptor_set = {
+  .device       = &usb_device,
+  .config_count = ARRAYSIZE(usb_configs),
+  .configs      = usb_configs,
+  .string_count = ARRAYSIZE(usb_strings),
+  .strings      = usb_strings,
+};
+
+static volatile uint8_t bulk_on = 0; // Bulk transfer status (0:stop,1:start)
+static volatile uint8_t req_cmd = 0; // Pending vendor request for main loop
 
 // start bulk trasfer ----------------------------------------------------------
 static void start_bulk(void) {
-  FIFORESET  = 0x80; SYNCDELAY; // NAK-ALL
-  EP6FIFOCFG = 0x00; SYNCDELAY; // manual mode
-  FIFORESET  = 0x06; SYNCDELAY; // reset EP6 FIFO
-  EP6FIFOCFG = 0x0C; SYNCDELAY; // EP6FIFO: AUTOIN=ON, ZEROLENIN=1, WORDWIDE=BYTE
-  FIFORESET  = 0x00; SYNCDELAY; // release NAK-ALL
+  FIFORESET  = _NAKALL;  SYNCDELAY; // NAK-ALL
+  EP6FIFOCFG = 0;        SYNCDELAY; // manual mode
+  FIFORESET  = _NAKALL|6; SYNCDELAY; // reset EP6 FIFO
+  EP6FIFOCFG = _AUTOIN|_ZEROLENIN; SYNCDELAY; // AUTOIN=ON, WORDWIDE=BYTE
+  FIFORESET  = 0;        SYNCDELAY; // release NAK-ALL
   bulk_on = 1;
 }
 
 // stop bulk trasfer -----------------------------------------------------------
 static void stop_bulk(void) {
-  EP6FIFOCFG = 0x04; SYNCDELAY; // EP6FIFO: AUTOIN=OFF, ZEROLENIN=1, WORDWIDE=BYTE
+  EP6FIFOCFG = _ZEROLENIN; SYNCDELAY; // AUTOIN=OFF, WORDWIDE=BYTE
   bulk_on = 0;
 }
 
-// SETUP routine ---------------------------------------------------------------
-void setup(void) {
-  CPUCS         = 0x10; SYNCDELAY; // CPU: CLKSPD=48MHz, CLKOUT=OFF
-  EP2FIFOCFG    = 0x00; SYNCDELAY; // EPxFIFO: WORDWIDE=BYTE (FD[15:8]=PD free)
-  EP4FIFOCFG    = 0x00; SYNCDELAY;
-  EP6FIFOCFG    = 0x00; SYNCDELAY;
-  EP8FIFOCFG    = 0x00; SYNCDELAY;
-  IFCONFIG      = 0x03 | (CLK_POL << 4); SYNCDELAY; // IFCLK=EXT, OUT_DIS, SYNC, SLAVE_FIFO
-  REVCTL        = 0x03; SYNCDELAY; // SLAVE-FIFO enabled
-  PORTACFG      = 0x00; SYNCDELAY; // PA7: no SLCS
-  EP2CFG        = 0x20; SYNCDELAY; // EP2: OFF, DIR=OUT, TYPE=BULK
-  EP4CFG        = 0x20; SYNCDELAY; // EP4: OFF, DIR=OUT, TYPE=BULK
-  EP6CFG        = 0xE0; SYNCDELAY; // EP6: ON, DIR=IN, TYPE=BULK, SIZE=512, BUF=4X
-  EP8CFG        = 0x60; SYNCDELAY; // EP8: OFF, DIR=IN, TYPE=BULK
-  FIFOPINPOLAR  = 0x00; SYNCDELAY; // SLAVE_FIFO_IF: SLWR,SLRD,SLOE,PKTEND=ACT_L
+// setup FX2LP slave FIFO ------------------------------------------------------
+static void setup(void) {
+  CPUCS        = _CLKSPD1; SYNCDELAY; // CPU: 48MHz, CLKOUT=OFF
+  REVCTL       = _ENH_PKT|_DYN_OUT; SYNCDELAY; // SLAVE-FIFO enhanced
+  IFCONFIG     = _IFCFG1|_IFCFG0|(CLK_POL ? _IFCLKPOL : 0); SYNCDELAY; // IFCLK=EXT, SYNC, SLAVE_FIFO
+  PORTACFG     = 0;     SYNCDELAY; // PA7: no SLCS
+  FIFOPINPOLAR = 0;     SYNCDELAY; // SLWR,SLRD,SLOE,PKTEND=ACT_L
+  EP1INCFG    &= ~_VALID; SYNCDELAY;
+  EP1OUTCFG   &= ~_VALID; SYNCDELAY;
+  EP2CFG      &= ~_VALID; SYNCDELAY;
+  EP4CFG      &= ~_VALID; SYNCDELAY;
+  EP6CFG       = _VALID|_DIR|_TYPE1; SYNCDELAY; // EP6: IN, BULK, 512, BUF=4X
+  EP8CFG      &= ~_VALID; SYNCDELAY;
+  EP2FIFOCFG   = 0;     SYNCDELAY; // WORDWIDE=BYTE for all (PD free)
+  EP4FIFOCFG   = 0;     SYNCDELAY;
+  EP8FIFOCFG   = 0;     SYNCDELAY;
   EP6AUTOINLENH = 0x02; SYNCDELAY; // EP6AUTOIN: PACKETLEN=512
   EP6AUTOINLENL = 0x00; SYNCDELAY;
-  FIFORESET     = 0x86; SYNCDELAY; // EP6FIFO: RESET
-  FIFORESET     = 0x00; SYNCDELAY;
-
   start_bulk();
-}
-
-// MAIN loop -------------------------------------------------------------------
-void loop(void) {
 }
 
 // handle USB vendor request ---------------------------------------------------
@@ -102,134 +167,39 @@ void loop(void) {
 //  Get device Info         0x40  I  -           4  Device info and status
 //  Start bulk transfer     0x44  O  -           0  -
 //  Stop bulk transfer      0x45  O  -           0  -
-//  Reset device            0x46  O  -           0  -
+//  Reset FIFO and restart  0x46  O  -           0  -
 //
-BOOL handle_req(void) {
-  if (SETUPDAT[1] == VR_STAT) {
+void handle_usb_setup(__xdata struct usb_req_setup *req) {
+  if (req->bmRequestType == (USB_RECIP_DEVICE|USB_TYPE_VENDOR|USB_DIR_IN) &&
+      req->bRequest == VR_STAT) {
     EP0BUF[0] = VER_FW;             // F/W version
-    EP0BUF[1] = MSB(F_TCXO);        // TCXO Frequency (kHz)
-    EP0BUF[2] = LSB(F_TCXO);
+    EP0BUF[1] = F_TCXO >> 8;        // TCXO Frequency (kHz)
+    EP0BUF[2] = F_TCXO & 0xFF;
     EP0BUF[3] = bulk_on;            // Bulk transfer status (0:stop,1:start)
-    EP0BCH = 0;
-    EP0BCL = 4;
+    SETUP_EP0_IN_BUF(4);
+    return;
   }
-  else if (SETUPDAT[1] == VR_START) {
-    EP0BCH = EP0BCL = 0;
-    start_bulk();
+  if (req->bmRequestType == (USB_RECIP_DEVICE|USB_TYPE_VENDOR|USB_DIR_OUT) &&
+      (req->bRequest == VR_START || req->bRequest == VR_STOP ||
+       req->bRequest == VR_RESET)) {
+    req_cmd = req->bRequest;
+    ACK_EP0();
+    return;
   }
-  else if (SETUPDAT[1] == VR_STOP) {
-    EP0BCH = EP0BCL = 0;
-    stop_bulk();
-  }
-  else if (SETUPDAT[1] == VR_RESET) {
-    EP0BCH = EP0BCL = 0;
-    stop_bulk();
-    setup();
-  }
-  else {
-    return TRUE; // undefined vendor request
-  }
-  return FALSE;
+  STALL_EP0();
 }
 
-// Cypress firmware framework functions ----------------------------------------
-extern BOOL GotSUD, Sleep, Rwuen;
-BYTE config, altset;
+// main ------------------------------------------------------------------------
+int main(void) {
+  setup();
+  usb_init(/*disconnect=*/true);
 
-// task dispatcher hooks
-void TD_Init            (void) {Rwuen = TRUE; setup();}
-void TD_Poll            (void) {loop();}
-BOOL TD_Suspend         (void) {return TRUE;}
-BOOL TD_Resume          (void) {return TRUE;}
-BOOL DR_GetDescriptor   (void) {return TRUE;}
-BOOL DR_GetStatus       (void) {return TRUE;}
-BOOL DR_ClearFeature    (void) {return TRUE;}
-BOOL DR_SetFeature      (void) {return TRUE;}
-BOOL DR_VendorCmnd      (void) {return handle_req();}
-BOOL DR_SetConfiguration(void) {config = SETUPDAT[2]; return TRUE;}
-BOOL DR_SetInterface    (void) {altset = SETUPDAT[2]; return TRUE;}
-BOOL DR_GetConfiguration(void) {EP0BUF[0] = config; EP0BCH = 0; EP0BCL = 1; return TRUE;}
-BOOL DR_GetInterface    (void) {EP0BUF[0] = altset; EP0BCH = 0; EP0BCL = 1; return TRUE;}
-
-// interrupt handlers
-void ISR_Sudav(void) interrupt 0 {
-  SUDPTRCTL |= bmSDPAUTO;
-  GotSUD = TRUE;
-  EZUSB_IRQ_CLEAR();
-  USBIRQ = bmSUDAV;
-}
-void ISR_Sutok(void) interrupt 0 {
-  EZUSB_IRQ_CLEAR();
-  USBIRQ = bmSUTOK;
-}
-void ISR_Sof(void) interrupt 0 {
-  EZUSB_IRQ_CLEAR();
-  USBIRQ = bmSOF;
-}
-void ISR_Ures(void) interrupt 0 {
-  if (EZUSB_HIGHSPEED()) {
-      pConfigDscr = pHighSpeedConfigDscr;
-      pOtherConfigDscr = pFullSpeedConfigDscr;
+  while (1) {
+    uint8_t cmd = req_cmd;
+    if (!cmd) continue;
+    req_cmd = 0;
+    if (cmd == VR_START) start_bulk();
+    else if (cmd == VR_STOP) stop_bulk();
+    else if (cmd == VR_RESET) setup();
   }
-  else {
-    pConfigDscr = pFullSpeedConfigDscr;
-    pOtherConfigDscr = pHighSpeedConfigDscr;
-  }
-  EZUSB_IRQ_CLEAR();
-  USBIRQ = bmURES;
 }
-void ISR_Susp(void) interrupt 0 {
-  Sleep = TRUE;
-  EZUSB_IRQ_CLEAR();
-  USBIRQ = bmSUSP;
-}
-void ISR_Highspeed(void) interrupt 0 {
-  if (EZUSB_HIGHSPEED()) {
-    pConfigDscr = pHighSpeedConfigDscr;
-    pOtherConfigDscr = pFullSpeedConfigDscr;
-  }
-  else {
-    pConfigDscr = pFullSpeedConfigDscr;
-    pOtherConfigDscr = pHighSpeedConfigDscr;
-  }
-  EZUSB_IRQ_CLEAR();
-  USBIRQ = bmHSGRANT;
-}
-void ISR_Ep0ack      (void) interrupt 0 {}
-void ISR_Stub        (void) interrupt 0 {}
-void ISR_Ep0in       (void) interrupt 0 {}
-void ISR_Ep0out      (void) interrupt 0 {}
-void ISR_Ep1in       (void) interrupt 0 {}
-void ISR_Ep1out      (void) interrupt 0 {}
-void ISR_Ep2inout    (void) interrupt 0 {}
-void ISR_Ep4inout    (void) interrupt 0 {}
-void ISR_Ep6inout    (void) interrupt 0 {}
-void ISR_Ep8inout    (void) interrupt 0 {}
-void ISR_Ibn         (void) interrupt 0 {}
-void ISR_Ep0pingnak  (void) interrupt 0 {}
-void ISR_Ep1pingnak  (void) interrupt 0 {}
-void ISR_Ep2pingnak  (void) interrupt 0 {}
-void ISR_Ep4pingnak  (void) interrupt 0 {}
-void ISR_Ep6pingnak  (void) interrupt 0 {}
-void ISR_Ep8pingnak  (void) interrupt 0 {}
-void ISR_Errorlimit  (void) interrupt 0 {}
-void ISR_Ep2piderror (void) interrupt 0 {}
-void ISR_Ep4piderror (void) interrupt 0 {}
-void ISR_Ep6piderror (void) interrupt 0 {}
-void ISR_Ep8piderror (void) interrupt 0 {}
-void ISR_Ep2pflag    (void) interrupt 0 {}
-void ISR_Ep4pflag    (void) interrupt 0 {}
-void ISR_Ep6pflag    (void) interrupt 0 {}
-void ISR_Ep8pflag    (void) interrupt 0 {}
-void ISR_Ep2eflag    (void) interrupt 0 {}
-void ISR_Ep4eflag    (void) interrupt 0 {}
-void ISR_Ep6eflag    (void) interrupt 0 {}
-void ISR_Ep8eflag    (void) interrupt 0 {}
-void ISR_Ep2fflag    (void) interrupt 0 {}
-void ISR_Ep4fflag    (void) interrupt 0 {}
-void ISR_Ep6fflag    (void) interrupt 0 {}
-void ISR_Ep8fflag    (void) interrupt 0 {}
-void ISR_GpifComplete(void) interrupt 0 {}
-void ISR_GpifWaveform(void) interrupt 0 {}
-
-// end of Cypress firmware framework functions ---------------------------------

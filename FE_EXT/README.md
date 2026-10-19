@@ -24,10 +24,11 @@ with that.
 ## **Directory Structure and Contents**
 ```
 FE_EXT --+-- FW
-         |   +-- fe_ext_fw.c     F/W source
-         |   +-- fe_ext_fw.Uv2   Keil uVision2 project (uses ../../FE_2CH/FW/v2.1/cypress)
-         |   +-- fe_ext_fw.Opt   Keil uVision2 project options
-         |   +-- clean.bat       remove build outputs
+         |   +-- fe_ext_fw.c     F/W source (SDCC + libfx2)
+         |   +-- fe_ext_fw.ihex  prebuilt F/W, Intel HEX (fx2tool)
+         |   +-- fe_ext_fw.iic   prebuilt F/W, EEPROM C2 image (CyControl)
+         |   +-- Makefile        F/W build
+         |   +-- hex2iic.py      Intel HEX to .iic converter
          |
          +-- util
              +-- fe_dump.c       C dump tool (libusb-1.0, async, full rate)
@@ -71,21 +72,39 @@ rising edge, rebuild with `CLK_POL` = 1 (falling edge) in `fe_ext_fw.c`.
 Boot EEPROM: C2 boot needs I2C EEPROM at address 0x51 with 2-byte addressing
 (24C32 .. 24C512, e.g. 24C128 on common CY7C68013A boards). 24C02 too small.
 
+CY3684 DVK board: set EEPROM SELECT switch to LARGE (24LC128). EEPROM ENABLE
+switch OFF at power-up gives blank boot (`04B4:8613`) for recovery; switch ON
+before writing. All needed FX2LP pins are on the DVK headers, see DVK user
+guide pin tables. Check DVK jumpers so no on-board part drives PB, PA2/4/5/6,
+RDY0/1 or IFCLK.
+
 --------------------------------------------------------------------------------
 
-## **Build F/W (Windows)**
+## **Build F/W**
 
-Toolchain: Keil C51 from Cypress CY3684 EZ-USB FX2LP Development Kit [1]
-(installs C:\Cypress, C:\Keil). Firmware is ~2 KB, fits Keil eval limit.
+Prebuilt `FW/fe_ext_fw.ihex` and `FW/fe_ext_fw.iic` are included (rising edge,
+04B4:1004). Rebuild only to change options. Toolchain is free: SDCC [4] +
+libfx2 [5]. No Keil needed.
 
-1. Execute Keil uVision (C:\Keil\UV2\uv2.exe, or later uVision opening the
-   Uv2 project).
-2. Project - Open Project, select `FE_EXT\FW\fe_ext_fw.Uv2`.
-3. Project - Rebuild all target files.
-4. Output: `FE_EXT\FW\fe_ext_fw.hex` (Intel HEX) and `fe_ext_fw.iic` (EEPROM
-   C2 image, made by hex2bix post-build step).
+Linux (Debian/Ubuntu):
+```
+sudo apt install sdcc make python3 git
+cd FE_EXT/FW
+git clone https://github.com/whitequark/libfx2
+make
+```
+Windows (MSYS2 UCRT64 shell [3]):
+```
+pacman -S mingw-w64-ucrt-x86_64-sdcc make python git
+cd FE_EXT/FW
+git clone https://github.com/whitequark/libfx2
+make
+```
+If MSYS2 has no sdcc package, install SDCC for Windows [4] and add its `bin`
+to PATH. Output: `fe_ext_fw.ihex` and `fe_ext_fw.iic`. Tested with SDCC 4.2.0,
+libfx2 commit 16cdf94.
 
-Options (Project - Options - C51 - Define, or edit source):
+Options: `make clean && make CFLAGS="-DSYNCDELAYLEN=16 -DCLK_POL=1"`
 * `CLK_POL=1` sample on falling edge.
 * `F_TCXO=26000` TCXO kHz reported by vendor request 0x40 (info only).
 
@@ -102,7 +121,7 @@ jumper (or lift EEPROM SDA), plug in (now `04B4:8613`), close jumper, flash.
 
 ```
 pip install fx2
-fx2tool -d 04b4:8613 -B program -W 2 -V 04b4 -P 1004 -f fe_ext_fw.hex
+fx2tool -d 04b4:8613 -B program -W 2 -V 04b4 -P 1004 -f fe_ext_fw.ihex
 ```
 Unplug and replug. `lsusb` (Linux) shows `04b4:1004`.
 
@@ -117,8 +136,10 @@ Windows: bind WinUSB driver to `04B4:8613` with Zadig [2] first.
 
 ### Option B: Cypress USB Control Center (Windows)
 
-1. Bind Cypress CyUSB driver to the device (see `driver/readme.txt`).
-2. Run CyControl.exe (`FE_2CH\FW\v2.1\cypress\CyControl.exe`).
+1. Bind Cypress CyUSB driver to the device (see `driver/readme.txt`; the
+   EZ-USB FX3 SDK driver also covers FX2LP).
+2. Run CyControl.exe (`FE_2CH\FW\v2.1\cypress\CyControl.exe`, or USB
+   Control Center from the FX3 SDK).
 3. Select device, menu Program - FX2 - 64KB EEPROM, select
    `FE_EXT\FW\fe_ext_fw.iic`.
 4. Status bar "Programming succeeded." Replug.
@@ -214,3 +235,7 @@ after USB enumeration.
 [2] Zadig, https://zadig.akeo.ie/
 
 [3] MSYS2, https://www.msys2.org/
+
+[4] SDCC, https://sdcc.sourceforge.net/
+
+[5] libfx2, https://github.com/whitequark/libfx2
