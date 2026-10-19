@@ -1,0 +1,216 @@
+# **Pocket SDR FE EXT - EZ-USB FX2LP F/W for External Real-Sampling Frontend**
+
+## **Overview**
+
+Firmware and host tools to stream samples from an external GNSS frontend
+(own TCXO, own ADC) through a Cypress EZ-USB FX2LP (CY7C68013A) to a PC.
+
+* ADC CLK of the frontend drives FX2LP IFCLK. Every ADC CLK rising edge, the
+  FX2LP latches FD[7:0] into the EP6 bulk IN FIFO (slave FIFO, 8-bit,
+  synchronous). No ADC CLK, no samples.
+* One byte per sample on USB: bit2 = SIGN, bit1 = MAGH, bit0 = MAGL.
+* 2-bit mode: host tools take (SIGN, MAGH) and pack 4 samples per byte.
+* No control signals from frontend. FX2LP FIFO control pins are static straps.
+
+Why packing is on host: 8051 core of FX2LP runs ~12 MIPS. Bit-packing per
+sample in firmware tops out well under 1 Msps. Slave FIFO hardware moves one
+byte per IFCLK with zero CPU work, up to 48 MHz IFCLK. Host packs 4:1 for free.
+If USB bandwidth must drop 4x, pack in hardware (e.g. 2 x 74HC164 shift
+registers + divide-by-4 of ADC CLK into IFCLK); this firmware works unchanged
+with that.
+
+--------------------------------------------------------------------------------
+
+## **Directory Structure and Contents**
+```
+FE_EXT --+-- FW
+         |   +-- fe_ext_fw.c     F/W source
+         |   +-- fe_ext_fw.Uv2   Keil uVision2 project (uses ../../FE_2CH/FW/v2.1/cypress)
+         |   +-- fe_ext_fw.Opt   Keil uVision2 project options
+         |   +-- clean.bat       remove build outputs
+         |
+         +-- util
+             +-- fe_dump.c       C dump tool (libusb-1.0, async, full rate)
+             +-- fe_dump.py      Python dump tool (pyusb, simple, lower rate)
+             +-- makefile        makefile for fe_dump
+```
+--------------------------------------------------------------------------------
+
+## **Connections**
+
+All signals 3.3 V CMOS. Common GND between frontend and FX2LP board. Keep
+ADC CLK wire short; 22-33 ohm series resistor at clock source helps.
+
+| Frontend      | FX2LP pin         | Note                                   |
+|---------------|-------------------|----------------------------------------|
+| ADC CLK       | IFCLK             | 5 - 48 MHz (FX2LP external IFCLK range)|
+| SIGN          | PB2 / FD2         |                                        |
+| MAGH          | PB1 / FD1         |                                        |
+| MAGL          | PB0 / FD0         | unused in 2-bit mode, tie GND if absent|
+| GND           | GND               |                                        |
+
+FX2LP static straps (on FX2LP board, direct wire or 1-10 kohm):
+
+| FX2LP pin       | Tie to | Meaning                         |
+|-----------------|--------|---------------------------------|
+| PB7-PB3 / FD7-3 | GND    | unused data bits                |
+| RDY1 / SLWR     | GND    | write always enabled (act. low) |
+| RDY0 / SLRD     | 3.3 V  | read inactive                   |
+| PA2 / SLOE      | 3.3 V  | FD output disabled              |
+| PA4 / FIFOADR0  | GND    | FIFOADR = 10b selects EP6       |
+| PA5 / FIFOADR1  | 3.3 V  |                                 |
+| PA6 / PKTEND    | 3.3 V  | inactive                        |
+
+FX2LP keeps its own 24 MHz crystal. Frontend 26 MHz TCXO is not connected to
+FX2LP; only ADC CLK goes to IFCLK.
+
+Timing: FX2LP samples FD at the selected IFCLK edge (setup ~9 ns, hold ~0 ns,
+see FX2LP datasheet). Default is rising edge. If ADC outputs change on the
+rising edge, rebuild with `CLK_POL` = 1 (falling edge) in `fe_ext_fw.c`.
+
+Boot EEPROM: C2 boot needs I2C EEPROM at address 0x51 with 2-byte addressing
+(24C32 .. 24C512, e.g. 24C128 on common CY7C68013A boards). 24C02 too small.
+
+--------------------------------------------------------------------------------
+
+## **Build F/W (Windows)**
+
+Toolchain: Keil C51 from Cypress CY3684 EZ-USB FX2LP Development Kit [1]
+(installs C:\Cypress, C:\Keil). Firmware is ~2 KB, fits Keil eval limit.
+
+1. Execute Keil uVision (C:\Keil\UV2\uv2.exe, or later uVision opening the
+   Uv2 project).
+2. Project - Open Project, select `FE_EXT\FW\fe_ext_fw.Uv2`.
+3. Project - Rebuild all target files.
+4. Output: `FE_EXT\FW\fe_ext_fw.hex` (Intel HEX) and `fe_ext_fw.iic` (EEPROM
+   C2 image, made by hex2bix post-build step).
+
+Options (Project - Options - C51 - Define, or edit source):
+* `CLK_POL=1` sample on falling edge.
+* `F_TCXO=26000` TCXO kHz reported by vendor request 0x40 (info only).
+
+--------------------------------------------------------------------------------
+
+## **Write F/W to EEPROM**
+
+Blank FX2LP (EEPROM empty or EEPROM jumper open at power-up) enumerates as
+`04B4:8613`. After flashing, device enumerates as `04B4:1004` (same as Pocket
+SDR FE 2CH). To reflash a board whose firmware misbehaves: unplug, open EEPROM
+jumper (or lift EEPROM SDA), plug in (now `04B4:8613`), close jumper, flash.
+
+### Option A: fx2tool (Linux and Windows)
+
+```
+pip install fx2
+fx2tool -d 04b4:8613 -B program -W 2 -V 04b4 -P 1004 -f fe_ext_fw.hex
+```
+Unplug and replug. `lsusb` (Linux) shows `04b4:1004`.
+
+Linux permission: run with `sudo`, or install udev rules (from repo root):
+```
+sudo cp driver/99-pocket-sdr.rules /etc/udev/rules.d/
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="04b4", ATTRS{idProduct}=="8613", MODE="0660", GROUP="plugdev", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/98-fx2-blank.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG plugdev $USER     # re-login
+```
+Windows: bind WinUSB driver to `04B4:8613` with Zadig [2] first.
+
+### Option B: Cypress USB Control Center (Windows)
+
+1. Bind Cypress CyUSB driver to the device (see `driver/readme.txt`).
+2. Run CyControl.exe (`FE_2CH\FW\v2.1\cypress\CyControl.exe`).
+3. Select device, menu Program - FX2 - 64KB EEPROM, select
+   `FE_EXT\FW\fe_ext_fw.iic`.
+4. Status bar "Programming succeeded." Replug.
+
+--------------------------------------------------------------------------------
+
+## **Host Driver**
+
+* Linux / macOS: libusb-1.0, no kernel driver. udev rule above for non-root.
+* Windows: dump tools use libusb, so `04B4:1004` needs WinUSB driver. Run
+  Zadig [2], Options - List All Devices, pick `04B4 1004`, driver WinUSB,
+  Replace Driver. (This replaces CyUSB for that device; CyControl then no
+  longer sees it. Use fx2tool to reflash, or switch driver back.)
+
+--------------------------------------------------------------------------------
+
+## **Dump Data**
+
+Output formats:
+* default `pack2`: 4 samples per byte, sample n in bits 7-6, n+1 in 5-4,
+  n+2 in 3-2, n+3 in 1-0. Each 2-bit field = (SIGN << 1) | MAGH.
+* `-r` raw: 1 byte/sample as from USB (bit2 SIGN, bit1 MAGH, bit0 MAGL), keeps
+  MAGL for 3-bit use.
+* `-i` int8: 1 byte/sample, (SIGN,MAGH) = 00:+1, 01:+3, 10:-1, 11:-3. Sign
+  polarity only flips carrier phase by 180 deg, no effect on acquisition or
+  tracking.
+
+Rate shown on screen must equal ADC CLK in MB/s (raw bytes). Lower rate means
+clock missing or USB overrun. FX2LP drops samples silently on overrun (SLWR
+tied, FIFO full ignored).
+
+### C tool (recommended, full rate, async libusb)
+
+Linux (Debian/Ubuntu/Raspberry Pi OS):
+```
+sudo apt install build-essential libusb-1.0-0-dev
+cd FE_EXT/util
+make
+./fe_dump -t 10 ifdata.bin          # 10 s, pack2
+./fe_dump -r ifdata_raw.bin         # raw, until Ctrl-C
+```
+Windows (MSYS2 UCRT64 shell [3]):
+```
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-libusb make
+cd FE_EXT/util
+make
+./fe_dump.exe -t 10 ifdata.bin
+```
+macOS: `brew install libusb`, then `make CFLAGS="-std=c99 -O2 -I/opt/homebrew/include" LDLIBS="-L/opt/homebrew/lib -lusb-1.0"`.
+
+### Python tool (simple, lower rate)
+
+```
+pip install pyusb numpy libusb-package
+python fe_dump.py -t 10 ifdata.bin
+python fe_dump.py -i ifdata_int8.bin
+```
+`libusb-package` bundles the libusb-1.0 DLL for Windows; on Linux system
+libusb-1.0 (`sudo apt install libusb-1.0-0`) also works. Python reads
+synchronously; at high sample rates (> ~10 Msps) gaps between reads can
+overflow FX2LP FIFO (2 KB). Use C tool for full rate.
+
+### Read pack2 file in Python
+```python
+import numpy as np
+b = np.fromfile('ifdata.bin', dtype=np.uint8)
+s = np.stack([(b >> 6) & 3, (b >> 4) & 3, (b >> 2) & 3, b & 3], axis=1).ravel()
+x = np.array([1, 3, -1, -3], dtype=np.int8)[s]   # int8 samples
+```
+
+--------------------------------------------------------------------------------
+
+## **USB Vendor Requests (optional)**
+
+Firmware starts streaming at power-up; requests not needed.
+
+| Request             | Code | Dir | Data                                     |
+|---------------------|------|-----|------------------------------------------|
+| Get device info     | 0x40 | IN  | 4 B: F/W ver, TCXO kHz (MSB, LSB), bulk status |
+| Start bulk transfer | 0x44 | OUT | - (also resets EP6 FIFO)                 |
+| Stop bulk transfer  | 0x45 | OUT | -                                        |
+| Reset device        | 0x46 | OUT | -                                        |
+
+Dump tools send 0x44 at start, so FIFO restarts clean even if ADC CLK came up
+after USB enumeration.
+
+--------------------------------------------------------------------------------
+
+## **References**
+
+[1] Cypress, CY3684 EZ-USB FX2LP Development Kit
+
+[2] Zadig, https://zadig.akeo.ie/
+
+[3] MSYS2, https://www.msys2.org/
