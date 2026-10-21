@@ -213,16 +213,42 @@ x = np.array([1, 3, -1, -3], dtype=np.int8)[s]   # int8 samples
 
 --------------------------------------------------------------------------------
 
+## **Troubleshooting: no data (0 MB/s)**
+
+1. `./fe_dump -s` (or `python fe_dump.py -s`) prints EP6 FIFO status without
+   reading data. With ADC CLK running on IFCLK and the straps correct, FIFO
+   fills while the host is not reading: `EP6CS ... FULL`, npak=4. `EMPTY`
+   means the chip sees no IFCLK edges: check clock wire on IFCLK, common GND,
+   RDY1 to GND, RDY0/PA2/PA5/PA6 to 3.3 V, PA4 to GND, clock level >= 2 V,
+   frequency 5-48 MHz.
+2. Self-test: disconnect ADC CLK wire from IFCLK, then `./fe_dump -x -t 2 t.bin`.
+   The FX2LP drives its own 48 MHz onto IFCLK pin, data flows if USB, FIFO
+   and straps are right (rate 30-40 MB/s, samples are bus noise). IFCLK is
+   restored to external on exit. Never run `-x` with ADC CLK connected.
+3. After self-test passes, reconnect ADC CLK and repeat step 1.
+
+F/W 1.1 or later is needed for `-s`, `-x` and `-B`. `./fe_dump -B` releases the
+8051 so F/W can be reloaded without touching jumpers:
+```
+./fe_dump -B
+fx2tool -d 04b4:1004 -B program -W 2 -V 04b4 -P 1004 -f fe_ext_fw.ihex
+```
+(`-B` is untested on hardware; if it fails, use the jumper method above.)
+
+--------------------------------------------------------------------------------
+
 ## **USB Vendor Requests (optional)**
 
 Firmware starts streaming at power-up; requests not needed.
 
 | Request             | Code | Dir | Data                                     |
 |---------------------|------|-----|------------------------------------------|
-| Get device info     | 0x40 | IN  | 4 B: F/W ver, TCXO kHz (MSB, LSB), bulk status |
+| Get device info     | 0x40 | IN  | 8 B: F/W ver, TCXO kHz (MSB, LSB), bulk status, EP6CS, EP6FIFOFLGS, EP6 FIFO bytes (MSB, LSB) |
 | Start bulk transfer | 0x44 | OUT | - (also resets EP6 FIFO)                 |
 | Stop bulk transfer  | 0x45 | OUT | -                                        |
 | Reset device        | 0x46 | OUT | -                                        |
+| IFCLK source        | 0x47 | OUT | wValue 0: external (ADC CLK), 1: internal 48 MHz on IFCLK pin (self-test) |
+| Release 8051        | 0x4F | OUT | - (device re-enumerates; `fx2tool` can reload F/W, no jumpers) |
 
 Dump tools send 0x44 at start, so FIFO restarts clean even if ADC CLK came up
 after USB enumeration.

@@ -7,6 +7,7 @@
 //
 //  History:
 //  2026-10-19  1.0  new
+//  2026-10-21  1.1  add -s (status), -x (self-test) and -B (release 8051)
 //
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,9 +26,14 @@
 #define DEV_PID     0x1004      // USB product ID
 #define DEV_IF      0           // USB interface
 #define DEV_EP      0x86        // USB bulk IN end point
+#define VR_STAT     0x40        // USB vendor request: get device info and status
 #define VR_START    0x44        // USB vendor request: start bulk transfer
+#define VR_IFCLK    0x47        // USB vendor request: IFCLK source (0:ext,1:int)
+#define VR_BOOT     0x4F        // USB vendor request: release 8051 for F/W reload
 #define VR_TYPE     (LIBUSB_RECIPIENT_DEVICE | LIBUSB_REQUEST_TYPE_VENDOR | \
                      LIBUSB_ENDPOINT_OUT)
+#define VR_TYPE_IN  (LIBUSB_RECIPIENT_DEVICE | LIBUSB_REQUEST_TYPE_VENDOR | \
+                     LIBUSB_ENDPOINT_IN)
 #define NUM_XFER    16          // number of USB transfers in flight
 #define SIZE_XFER   (256*1024)  // size of USB transfer (bytes)
 
@@ -47,11 +53,14 @@ static int n_acc = 0;           // samples in accumulator
 static unsigned char obuf[SIZE_XFER]; // output buffer
 
 static const char *usage =
-    "usage: " PROG_NAME " [-t sec] [-r | -i] [-q] [file]\n"
+    "usage: " PROG_NAME " [-t sec] [-r | -i] [-q] [-s | -x | -B] [file]\n"
     "  -t sec  capture time in seconds (default: 0 = until Ctrl-C)\n"
     "  -r      raw output, 1 byte/sample (bit2=SIGN,bit1=MAGH,bit0=MAGL)\n"
     "  -i      int8 output, 1 byte/sample (+1,+3,-1,-3)\n"
     "  -q      suppress status output\n"
+    "  -s      print device/FIFO status and exit (shows if IFCLK edges arrive)\n"
+    "  -x      self-test: use FX2LP internal 48MHz IFCLK (disconnect ADC CLK!)\n"
+    "  -B      release 8051 so F/W can be reloaded without jumpers, then exit\n"
     "  file    output file (default: fe_dump.bin, '-': stdout)\n";
 
 // signal handler --------------------------------------------------------------
@@ -102,6 +111,28 @@ static void LIBUSB_CALL xfer_cb(struct libusb_transfer *xfer)
     n_active--;
 }
 
+// print device and EP6 FIFO status --------------------------------------------
+static int print_status(libusb_device_handle *h)
+{
+    unsigned char b[8] = {0};
+    int i;
+    
+    if (libusb_control_transfer(h, VR_TYPE_IN, VR_STAT, 0, 0, b, 8, 1000) < 8) {
+        fprintf(stderr, "status read error (old F/W?)\n");
+        return 1;
+    }
+    for (i = 0; i < 3; i++) {
+        printf("F/W ver=%d.%d  bulk=%d  EP6CS=0x%02X (%s%s npak=%d)  EP6FIFOFLGS=0x%02X  "
+               "EP6 FIFO bytes=%d\n", b[0] >> 4, b[0] & 15, b[3], b[4],
+            b[4] & 4 ? "EMPTY " : "", b[4] & 8 ? "FULL " : "", (b[4] >> 4) & 7, b[5],
+            (b[6] << 8) | b[7]);
+        libusb_control_transfer(h, VR_TYPE_IN, VR_STAT, 0, 0, b, 8, 1000);
+    }
+    printf("FIFO FULL/NPAK>0 while host not reading = IFCLK edges are arriving.\n"
+           "FIFO EMPTY = no IFCLK edges (check clock wire, GND, RDY1, level).\n");
+    return 0;
+}
+
 // main ------------------------------------------------------------------------
 int main(int argc, char **argv)
 {
@@ -111,7 +142,7 @@ int main(int argc, char **argv)
     struct timeval tv = {0, 100000};
     const char *file = "fe_dump.bin";
     double tmax = 0.0;
-    int i, ret = 1, quiet = 0;
+    int i, ret = 1, quiet = 0, status = 0, selftest = 0, boot = 0;
     time_t t0, t1 = 0;
     long long n_prev = 0;
 
@@ -120,13 +151,20 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-r")) fmt = FMT_RAW;
         else if (!strcmp(argv[i], "-i")) fmt = FMT_INT8;
         else if (!strcmp(argv[i], "-q")) quiet = 1;
+        else if (!strcmp(argv[i], "-s")) status = 1;
+        else if (!strcmp(argv[i], "-x")) selftest = 1;
+        else if (!strcmp(argv[i], "-B")) boot = 1;
         else if (argv[i][0] == '-' && argv[i][1]) {
             fprintf(stderr, "%s", usage);
             return 1;
         }
         else file = argv[i];
     }
-    if (!strcmp(file, "-")) {
+    if (status || boot) file = NULL;
+    if (!file) {
+        fp_out = NULL;
+    }
+    else if (!strcmp(file, "-")) {
 #ifdef _WIN32
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
@@ -148,6 +186,20 @@ int main(int argc, char **argv)
     if (libusb_claim_interface(h, DEV_IF)) {
         fprintf(stderr, "libusb_claim_interface error\n");
         goto exit;
+    }
+    if (status) {
+        ret = print_status(h);
+        goto exit;
+    }
+    if (boot) {
+        libusb_control_transfer(h, VR_TYPE, VR_BOOT, 0, 0, NULL, 0, 1000);
+        printf("8051 released. Device now serves F/W load, e.g.:\n"
+               "  fx2tool -d 04b4:1004 -B program -W 2 -V 04b4 -P 1004 -f fe_ext_fw.ihex\n");
+        ret = 0;
+        goto exit;
+    }
+    if (selftest) {
+        libusb_control_transfer(h, VR_TYPE, VR_IFCLK, 1, 0, NULL, 0, 1000);
     }
     libusb_control_transfer(h, VR_TYPE, VR_START, 0, 0, NULL, 0, 1000);
 
@@ -200,6 +252,9 @@ exit:
         libusb_free_transfer(xfer[i]);
     }
     if (h) {
+        if (selftest) {
+            libusb_control_transfer(h, VR_TYPE, VR_IFCLK, 0, 0, NULL, 0, 1000);
+        }
         libusb_release_interface(h, DEV_IF);
         libusb_close(h);
     }

@@ -34,7 +34,7 @@
 #include <fx2usb.h>
 
 // constants and macros -------------------------------------------------------
-#define VER_FW       0x01       // Firmware version
+#define VER_FW       0x11       // Firmware version
 #ifndef F_TCXO
 #define F_TCXO       26000      // Frontend TCXO frequency (kHz)
 #endif
@@ -46,6 +46,9 @@
 #define VR_START     0x44       // USB vendor request: Start bulk transfer
 #define VR_STOP      0x45       // USB vendor request: Stop bulk transfer
 #define VR_RESET     0x46       // USB vendor request: Reset FIFO and restart
+#define VR_IFCLK     0x47       // USB vendor request: IFCLK source (wValue 0:ext,1:int 48MHz)
+#define VR_BOOT      0x4F       // USB vendor request: Release 8051 for F/W reload
+#define IFCFG_SLAVE  (_IFCFG1|_IFCFG0) // IFCONFIG: slave FIFO interface
 
 // USB descriptors -------------------------------------------------------------
 usb_desc_device_c usb_device = {
@@ -122,6 +125,7 @@ usb_descriptor_set_c usb_descriptor_set = {
 
 static volatile uint8_t bulk_on = 0; // Bulk transfer status (0:stop,1:start)
 static volatile uint8_t req_cmd = 0; // Pending vendor request for main loop
+static volatile uint8_t req_val = 0; // Pending vendor request wValue
 
 // start bulk trasfer ----------------------------------------------------------
 static void start_bulk(void) {
@@ -139,11 +143,21 @@ static void stop_bulk(void) {
   bulk_on = 0;
 }
 
+// set IFCLK source ------------------------------------------------------------
+static void set_ifclk(uint8_t internal) {
+  if (internal) { // self-test: FX2LP drives IFCLK pin with 48MHz, disconnect ADC CLK
+    IFCONFIG = _IFCLKSRC|_3048MHZ|_IFCLKOE|IFCFG_SLAVE; SYNCDELAY;
+  }
+  else {
+    IFCONFIG = IFCFG_SLAVE|(CLK_POL ? _IFCLKPOL : 0); SYNCDELAY; // IFCLK=EXT, SYNC
+  }
+}
+
 // setup FX2LP slave FIFO ------------------------------------------------------
 static void setup(void) {
   CPUCS        = _CLKSPD1; SYNCDELAY; // CPU: 48MHz, CLKOUT=OFF
   REVCTL       = _ENH_PKT|_DYN_OUT; SYNCDELAY; // SLAVE-FIFO enhanced
-  IFCONFIG     = _IFCFG1|_IFCFG0|(CLK_POL ? _IFCLKPOL : 0); SYNCDELAY; // IFCLK=EXT, SYNC, SLAVE_FIFO
+  set_ifclk(0);
   PORTACFG     = 0;     SYNCDELAY; // PA7: no SLCS
   FIFOPINPOLAR = 0;     SYNCDELAY; // SLWR,SLRD,SLOE,PKTEND=ACT_L
   EP1INCFG    &= ~_VALID; SYNCDELAY;
@@ -164,10 +178,15 @@ static void setup(void) {
 //
 //  USB vendor request      code dir wValue   bytes data
 //
-//  Get device Info         0x40  I  -           4  Device info and status
+//  Get device Info         0x40  I  -         4-8  Device info and status
 //  Start bulk transfer     0x44  O  -           0  -
 //  Stop bulk transfer      0x45  O  -           0  -
 //  Reset FIFO and restart  0x46  O  -           0  -
+//  Set IFCLK source        0x47  O  0:ext 1:int 0  -
+//  Release 8051 for reload 0x4F  O  -           0  -
+//
+//  Device info: [0] F/W version, [1][2] TCXO kHz (MSB,LSB), [3] bulk status,
+//  [4] EP6CS, [5] EP6FIFOFLGS, [6][7] EP6 FIFO byte count (MSB,LSB)
 //
 void handle_usb_setup(__xdata struct usb_req_setup *req) {
   if (req->bmRequestType == (USB_RECIP_DEVICE|USB_TYPE_VENDOR|USB_DIR_IN) &&
@@ -176,12 +195,18 @@ void handle_usb_setup(__xdata struct usb_req_setup *req) {
     EP0BUF[1] = F_TCXO >> 8;        // TCXO Frequency (kHz)
     EP0BUF[2] = F_TCXO & 0xFF;
     EP0BUF[3] = bulk_on;            // Bulk transfer status (0:stop,1:start)
-    SETUP_EP0_IN_BUF(4);
+    EP0BUF[4] = EP6CS;              // EP6 status (bit2:EMPTY,bit3:FULL,bit6-4:NPAK)
+    EP0BUF[5] = EP6FIFOFLGS;        // EP6 FIFO flags (bit1:full,bit0:empty)
+    EP0BUF[6] = EP6FIFOBCH;         // EP6 FIFO byte count
+    EP0BUF[7] = EP6FIFOBCL;
+    SETUP_EP0_IN_BUF(req->wLength < 8 ? (uint8_t)req->wLength : 8);
     return;
   }
   if (req->bmRequestType == (USB_RECIP_DEVICE|USB_TYPE_VENDOR|USB_DIR_OUT) &&
       (req->bRequest == VR_START || req->bRequest == VR_STOP ||
-       req->bRequest == VR_RESET)) {
+       req->bRequest == VR_RESET || req->bRequest == VR_IFCLK ||
+       req->bRequest == VR_BOOT)) {
+    req_val = (uint8_t)req->wValue;
     req_cmd = req->bRequest;
     ACK_EP0();
     return;
@@ -201,5 +226,15 @@ int main(void) {
     if (cmd == VR_START) start_bulk();
     else if (cmd == VR_STOP) stop_bulk();
     else if (cmd == VR_RESET) setup();
+    else if (cmd == VR_IFCLK) {
+      set_ifclk(req_val);
+      start_bulk();
+    }
+    else if (cmd == VR_BOOT) { // 8051 core serves 0xA0 firmware load again
+      USBCS |= _DISCON;
+      USBCS &= ~_RENUM;
+      delay_ms(250);
+      USBCS &= ~_DISCON;
+    }
   }
 }
