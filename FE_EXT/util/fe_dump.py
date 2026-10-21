@@ -8,7 +8,7 @@
 #
 #  History:
 #  2026-10-19  1.0  new
-#  2026-10-21  1.1  add -s (status), -x (self-test) and -p (pins)
+#  2026-10-21  1.1  add -s (status), -x (self-test), -p (pins) and -f (falling edge)
 #
 import sys, time, signal, argparse, threading, queue
 import numpy as np
@@ -37,7 +37,7 @@ def get_backend():
         return None
 
 # open device ------------------------------------------------------------------
-def open_dev(start=True, selftest=False):
+def open_dev(start=True, mode=0):
     dev = usb.core.find(idVendor=DEV_VID, idProduct=DEV_PID, backend=get_backend())
     if dev is None:
         raise SystemExit('no device %04X:%04X (check connection/driver/permission)' %
@@ -48,8 +48,8 @@ def open_dev(start=True, selftest=False):
         pass
     usb.util.claim_interface(dev, DEV_IF)
     if start:
-        if selftest:
-            dev.ctrl_transfer(0x40, VR_IFCLK, 1, 0, None, 1000)
+        if mode:
+            dev.ctrl_transfer(0x40, VR_IFCLK, mode, 0, None, 1000)
         dev.ctrl_transfer(0x40, VR_START, 0, 0, None, 1000)
     return dev
 
@@ -127,6 +127,8 @@ def main():
         help='print device/FIFO status and exit (shows if IFCLK edges arrive)')
     ap.add_argument('-p', action='store_true',
         help='print PA/PB/RDY pin levels and check straps (needs no clock)')
+    ap.add_argument('-f', action='store_true',
+        help='sample on ADC CLK falling edge (default: rising)')
     ap.add_argument('-x', action='store_true',
         help='self-test: use FX2LP internal 48MHz IFCLK (disconnect ADC CLK!)')
     ap.add_argument('file', nargs='?', default='fe_dump.bin',
@@ -141,7 +143,7 @@ def main():
         usb.util.dispose_resources(dev)
         return
     fp = sys.stdout.buffer if args.file == '-' else open(args.file, 'wb')
-    dev = open_dev(selftest=args.x)
+    dev = open_dev(mode=1 if args.x else 2 if args.f else 0)
     que, stop = queue.Queue(), threading.Event()
     th = threading.Thread(target=read_thread, args=(dev, que, stop), daemon=True)
     signal.signal(signal.SIGINT, lambda sig, frame: stop.set())
@@ -169,8 +171,8 @@ def main():
             n_prev, t1 = n_byte, t
     if not args.q:
         print('', file=sys.stderr)
-    if args.x:
-        dev.ctrl_transfer(0x40, VR_IFCLK, 0, 0, None, 1000)
+    if args.x or args.f:
+        dev.ctrl_transfer(0x40, VR_IFCLK, 3, 0, None, 1000)
     usb.util.release_interface(dev, DEV_IF)
     usb.util.dispose_resources(dev)
     if fp is not sys.stdout.buffer:

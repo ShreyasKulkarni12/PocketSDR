@@ -7,7 +7,7 @@
 //
 //  History:
 //  2026-10-19  1.0  new
-//  2026-10-21  1.1  add -s (status), -x (self-test), -B (release 8051), -p (pins)
+//  2026-10-21  1.1  add -s (status), -x (self-test), -B (release 8051), -p (pins), -f (falling edge)
 //
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,13 +54,14 @@ static int n_acc = 0;           // samples in accumulator
 static unsigned char obuf[SIZE_XFER]; // output buffer
 
 static const char *usage =
-    "usage: " PROG_NAME " [-t sec] [-r | -i] [-q] [-s | -p | -x | -B] [file]\n"
+    "usage: " PROG_NAME " [-t sec] [-r | -i] [-q] [-s | -p | -x | -f | -B] [file]\n"
     "  -t sec  capture time in seconds (default: 0 = until Ctrl-C)\n"
     "  -r      raw output, 1 byte/sample (bit2=SIGN,bit1=MAGH,bit0=MAGL)\n"
     "  -i      int8 output, 1 byte/sample (+1,+3,-1,-3)\n"
     "  -q      suppress status output\n"
     "  -s      print device/FIFO status and exit (shows if IFCLK edges arrive)\n"
     "  -p      print PA/PB/RDY pin levels and check straps (needs no clock)\n"
+    "  -f      sample on ADC CLK falling edge (default: rising)\n"
     "  -x      self-test: use FX2LP internal 48MHz IFCLK (disconnect ADC CLK!)\n"
     "  -B      release 8051 so F/W can be reloaded without jumpers, then exit\n"
     "  file    output file (default: fe_dump.bin, '-': stdout)\n";
@@ -179,7 +180,7 @@ int main(int argc, char **argv)
     struct timeval tv = {0, 100000};
     const char *file = "fe_dump.bin";
     double tmax = 0.0;
-    int i, ret = 1, quiet = 0, status = 0, selftest = 0, boot = 0, pins = 0;
+    int i, ret = 1, quiet = 0, status = 0, selftest = 0, boot = 0, pins = 0, falling = 0;
     time_t t0, t1 = 0;
     long long n_prev = 0;
 
@@ -190,6 +191,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-q")) quiet = 1;
         else if (!strcmp(argv[i], "-s")) status = 1;
         else if (!strcmp(argv[i], "-p")) pins = 1;
+        else if (!strcmp(argv[i], "-f")) falling = 1;
         else if (!strcmp(argv[i], "-x")) selftest = 1;
         else if (!strcmp(argv[i], "-B")) boot = 1;
         else if (argv[i][0] == '-' && argv[i][1]) {
@@ -240,8 +242,8 @@ int main(int argc, char **argv)
         ret = 0;
         goto exit;
     }
-    if (selftest) {
-        libusb_control_transfer(h, VR_TYPE, VR_IFCLK, 1, 0, NULL, 0, 1000);
+    if (selftest || falling) {
+        libusb_control_transfer(h, VR_TYPE, VR_IFCLK, selftest ? 1 : 2, 0, NULL, 0, 1000);
     }
     libusb_control_transfer(h, VR_TYPE, VR_START, 0, 0, NULL, 0, 1000);
 
@@ -294,8 +296,8 @@ exit:
         libusb_free_transfer(xfer[i]);
     }
     if (h) {
-        if (selftest) {
-            libusb_control_transfer(h, VR_TYPE, VR_IFCLK, 0, 0, NULL, 0, 1000);
+        if (selftest || falling) {
+            libusb_control_transfer(h, VR_TYPE, VR_IFCLK, 3, 0, NULL, 0, 1000);
         }
         libusb_release_interface(h, DEV_IF);
         libusb_close(h);

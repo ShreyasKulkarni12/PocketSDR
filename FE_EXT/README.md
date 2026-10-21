@@ -67,7 +67,8 @@ FX2LP; only ADC CLK goes to IFCLK.
 
 Timing: FX2LP samples FD at the selected IFCLK edge (setup ~9 ns, hold ~0 ns,
 see FX2LP datasheet). Default is rising edge. If ADC outputs change on the
-rising edge, rebuild with `CLK_POL` = 1 (falling edge) in `fe_ext_fw.c`.
+rising edge, use `fe_dump -f` (F/W 1.3 or later) to sample on the falling edge,
+or rebuild with `CLK_POL=1` to make it the power-up default.
 
 Boot EEPROM: C2 boot needs I2C EEPROM at address 0x51 with 2-byte addressing
 (24C32 .. 24C512, e.g. 24C128 on common CY7C68013A boards). 24C02 too small.
@@ -231,9 +232,13 @@ x = np.array([1, 3, -1, -3], dtype=np.int8)[s]   # int8 samples
    The FX2LP drives its own 48 MHz onto IFCLK pin, data flows if USB, FIFO
    and straps are right (rate 30-40 MB/s, samples are bus noise). IFCLK is
    restored to external on exit. Never run `-x` with ADC CLK connected.
-4. After self-test passes, reconnect ADC CLK and repeat step 1.
+4. Odd statistics (SIGN far from 50 %, MAGH strongly tied to SIGN) can mean
+   the chip samples while the ADC outputs change. Capture with `-f` and
+   compare: the better edge gives SIGN near 50 % and MAGH below 50 % and
+   nearly independent of SIGN.
+5. After self-test passes, reconnect ADC CLK and repeat step 1.
 
-F/W 1.1 or later is needed for `-s`, `-x` and `-B`, 1.2 for `-p`. `./fe_dump -B` releases the
+F/W 1.1 or later is needed for `-s`, `-x` and `-B`, 1.2 for `-p`, 1.3 for `-f`. `./fe_dump -B` releases the
 8051 so F/W can be reloaded without touching jumpers:
 ```
 ./fe_dump -B
@@ -254,7 +259,7 @@ Firmware starts streaming at power-up; requests not needed.
 | Stop bulk transfer  | 0x45 | OUT | -                                        |
 | Reset device        | 0x46 | OUT | -                                        |
 | Read pin levels     | 0x48 | IN  | 6 B: PA, PB, RDY (slave mode), PA, PB, RDY (port mode) |
-| IFCLK source        | 0x47 | OUT | wValue 0: external (ADC CLK), 1: internal 48 MHz on IFCLK pin (self-test) |
+| IFCLK mode          | 0x47 | OUT | wValue 0: external, power-up edge; 1: internal 48 MHz on IFCLK pin (self-test); 2: external, falling edge; 3: external, rising edge |
 | Release 8051        | 0x4F | OUT | - (device re-enumerates; `fx2tool` can reload F/W, no jumpers) |
 
 Dump tools send 0x44 at start, so FIFO restarts clean even if ADC CLK came up

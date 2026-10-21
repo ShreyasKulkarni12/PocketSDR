@@ -34,7 +34,7 @@
 #include <fx2usb.h>
 
 // constants and macros -------------------------------------------------------
-#define VER_FW       0x12       // Firmware version
+#define VER_FW       0x13       // Firmware version
 #ifndef F_TCXO
 #define F_TCXO       26000      // Frontend TCXO frequency (kHz)
 #endif
@@ -46,7 +46,7 @@
 #define VR_START     0x44       // USB vendor request: Start bulk transfer
 #define VR_STOP      0x45       // USB vendor request: Stop bulk transfer
 #define VR_RESET     0x46       // USB vendor request: Reset FIFO and restart
-#define VR_IFCLK     0x47       // USB vendor request: IFCLK source (wValue 0:ext,1:int 48MHz)
+#define VR_IFCLK     0x47       // USB vendor request: IFCLK mode (wValue 0:ext,1:int 48MHz,2:ext falling,3:ext rising)
 #define VR_PINS      0x48       // USB vendor request: Read PA, PB, RDY pin levels
 #define VR_BOOT      0x4F       // USB vendor request: Release 8051 for F/W reload
 #define IFCFG_SLAVE  (_IFCFG1|_IFCFG0) // IFCONFIG: slave FIFO interface
@@ -144,13 +144,14 @@ static void stop_bulk(void) {
   bulk_on = 0;
 }
 
-// set IFCLK source ------------------------------------------------------------
-static void set_ifclk(uint8_t internal) {
-  if (internal) { // self-test: FX2LP drives IFCLK pin with 48MHz, disconnect ADC CLK
+// set IFCLK mode (0:ext default edge,1:int 48MHz,2:ext falling,3:ext rising) ---
+static void set_ifclk(uint8_t mode) {
+  if (mode == 1) { // self-test: FX2LP drives IFCLK pin with 48MHz, disconnect ADC CLK
     IFCONFIG = _IFCLKSRC|_3048MHZ|_IFCLKOE|IFCFG_SLAVE; SYNCDELAY;
   }
   else {
-    IFCONFIG = IFCFG_SLAVE|(CLK_POL ? _IFCLKPOL : 0); SYNCDELAY; // IFCLK=EXT, SYNC
+    uint8_t fall = mode == 2 ? 1 : mode == 3 ? 0 : CLK_POL;
+    IFCONFIG = IFCFG_SLAVE|(fall ? _IFCLKPOL : 0); SYNCDELAY; // IFCLK=EXT, SYNC
   }
 }
 
@@ -183,7 +184,7 @@ static void setup(void) {
 //  Start bulk transfer     0x44  O  -           0  -
 //  Stop bulk transfer      0x45  O  -           0  -
 //  Reset FIFO and restart  0x46  O  -           0  -
-//  Set IFCLK source        0x47  O  0:ext 1:int 0  -
+//  Set IFCLK mode          0x47  O  0-3         0  -  (0:ext,1:int,2:ext fall,3:ext rise)
 //  Read pin levels         0x48  I  -           6  PA, PB, RDY levels (see below)
 //  Release 8051 for reload 0x4F  O  -           0  -
 //
