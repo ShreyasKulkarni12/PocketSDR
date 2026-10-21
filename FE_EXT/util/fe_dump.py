@@ -8,7 +8,7 @@
 #
 #  History:
 #  2026-10-19  1.0  new
-#  2026-10-21  1.1  add -s (status) and -x (self-test)
+#  2026-10-21  1.1  add -s (status), -x (self-test) and -p (pins)
 #
 import sys, time, signal, argparse, threading, queue
 import numpy as np
@@ -22,6 +22,7 @@ DEV_EP    = 0x86        # USB bulk IN end point
 VR_STAT   = 0x40        # USB vendor request: get device info and status
 VR_START  = 0x44        # USB vendor request: start bulk transfer
 VR_IFCLK  = 0x47        # USB vendor request: IFCLK source (0:ext,1:int)
+VR_PINS   = 0x48        # USB vendor request: read PA, PB, RDY pin levels
 SIZE_READ = 1 << 20     # size of USB read (bytes)
 
 # int8 sample values for (SIGN,MAGH) = 0,1,2,3 ---------------------------------
@@ -51,6 +52,26 @@ def open_dev(start=True, selftest=False):
             dev.ctrl_transfer(0x40, VR_IFCLK, 1, 0, None, 1000)
         dev.ctrl_transfer(0x40, VR_START, 0, 0, None, 1000)
     return dev
+
+# print pin levels and check straps --------------------------------------------
+def print_pins(dev):
+    chk = [('RDY0 (SLRD)', 2, 0, 1), ('RDY1 (SLWR)', 2, 1, 0),
+           ('PA2  (SLOE)', 0, 2, 1), ('PA4  (FIFOADR0)', 0, 4, 0),
+           ('PA5  (FIFOADR1)', 0, 5, 1), ('PA6  (PKTEND)', 0, 6, 1)]
+    hi, lo = 0, 0xFF
+    for i in range(50):
+        b = bytes(dev.ctrl_transfer(0xC0, VR_PINS, 0, 0, 6, 1000))
+        if len(b) < 6:
+            raise SystemExit('pin read error (needs F/W 1.2 or later)')
+        hi, lo = hi | b[4], lo & b[4]
+    print('%-18s expect  read' % 'strap')
+    for name, port, bit, expect in chk:
+        v = (b[3 + port] >> bit) & 1
+        print('%-18s %d       %d  %s' % (name, expect, v, 'OK' if v == expect else 'BAD'))
+    print('\nPB (data) bits over 50 reads: 7..0 = ' + ''.join(
+        '0' if not (hi >> i) & 1 else '1' if (lo >> i) & 1 else 'T'
+        for i in range(7, -1, -1)) + '   (0=stuck low, 1=stuck high, T=toggling)')
+    print('SIGN=PB2, MAGH=PB1, MAGL=PB0. Unused PB3-PB7 should be 0.')
 
 # print device and EP6 FIFO status ---------------------------------------------
 def print_status(dev):
@@ -104,6 +125,8 @@ def main():
     ap.add_argument('-q', action='store_true', help='suppress status output')
     ap.add_argument('-s', action='store_true',
         help='print device/FIFO status and exit (shows if IFCLK edges arrive)')
+    ap.add_argument('-p', action='store_true',
+        help='print PA/PB/RDY pin levels and check straps (needs no clock)')
     ap.add_argument('-x', action='store_true',
         help='self-test: use FX2LP internal 48MHz IFCLK (disconnect ADC CLK!)')
     ap.add_argument('file', nargs='?', default='fe_dump.bin',
@@ -111,9 +134,9 @@ def main():
     args = ap.parse_args()
     fmt = 'raw' if args.r else 'int8' if args.i else 'pack2'
 
-    if args.s:
+    if args.s or args.p:
         dev = open_dev(start=False)
-        print_status(dev)
+        print_pins(dev) if args.p else print_status(dev)
         usb.util.release_interface(dev, DEV_IF)
         usb.util.dispose_resources(dev)
         return

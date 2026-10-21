@@ -34,7 +34,7 @@
 #include <fx2usb.h>
 
 // constants and macros -------------------------------------------------------
-#define VER_FW       0x11       // Firmware version
+#define VER_FW       0x12       // Firmware version
 #ifndef F_TCXO
 #define F_TCXO       26000      // Frontend TCXO frequency (kHz)
 #endif
@@ -47,6 +47,7 @@
 #define VR_STOP      0x45       // USB vendor request: Stop bulk transfer
 #define VR_RESET     0x46       // USB vendor request: Reset FIFO and restart
 #define VR_IFCLK     0x47       // USB vendor request: IFCLK source (wValue 0:ext,1:int 48MHz)
+#define VR_PINS      0x48       // USB vendor request: Read PA, PB, RDY pin levels
 #define VR_BOOT      0x4F       // USB vendor request: Release 8051 for F/W reload
 #define IFCFG_SLAVE  (_IFCFG1|_IFCFG0) // IFCONFIG: slave FIFO interface
 
@@ -183,10 +184,15 @@ static void setup(void) {
 //  Stop bulk transfer      0x45  O  -           0  -
 //  Reset FIFO and restart  0x46  O  -           0  -
 //  Set IFCLK source        0x47  O  0:ext 1:int 0  -
+//  Read pin levels         0x48  I  -           6  PA, PB, RDY levels (see below)
 //  Release 8051 for reload 0x4F  O  -           0  -
 //
 //  Device info: [0] F/W version, [1][2] TCXO kHz (MSB,LSB), [3] bulk status,
 //  [4] EP6CS, [5] EP6FIFOFLGS, [6][7] EP6 FIFO byte count (MSB,LSB)
+//
+//  Pin levels: [0] PA, [1] PB, [2] RDY (bit0:RDY0,bit1:RDY1) read in slave
+//  FIFO mode, [3][4][5] same read in port mode (interface briefly switched
+//  off, streaming is disturbed for a few us)
 //
 void handle_usb_setup(__xdata struct usb_req_setup *req) {
   if (req->bmRequestType == (USB_RECIP_DEVICE|USB_TYPE_VENDOR|USB_DIR_IN) &&
@@ -200,6 +206,20 @@ void handle_usb_setup(__xdata struct usb_req_setup *req) {
     EP0BUF[6] = EP6FIFOBCH;         // EP6 FIFO byte count
     EP0BUF[7] = EP6FIFOBCL;
     SETUP_EP0_IN_BUF(req->wLength < 8 ? (uint8_t)req->wLength : 8);
+    return;
+  }
+  if (req->bmRequestType == (USB_RECIP_DEVICE|USB_TYPE_VENDOR|USB_DIR_IN) &&
+      req->bRequest == VR_PINS) {
+    uint8_t ifc = IFCONFIG;
+    EP0BUF[0] = IOA;
+    EP0BUF[1] = IOB;
+    EP0BUF[2] = GPIFREADYSTAT;
+    IFCONFIG = 0; SYNCDELAY; SYNCDELAY; // port mode: pins are plain inputs
+    EP0BUF[3] = IOA;
+    EP0BUF[4] = IOB;
+    EP0BUF[5] = GPIFREADYSTAT;
+    IFCONFIG = ifc; SYNCDELAY;
+    SETUP_EP0_IN_BUF(6);
     return;
   }
   if (req->bmRequestType == (USB_RECIP_DEVICE|USB_TYPE_VENDOR|USB_DIR_OUT) &&

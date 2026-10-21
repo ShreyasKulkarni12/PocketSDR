@@ -7,7 +7,7 @@
 //
 //  History:
 //  2026-10-19  1.0  new
-//  2026-10-21  1.1  add -s (status), -x (self-test) and -B (release 8051)
+//  2026-10-21  1.1  add -s (status), -x (self-test), -B (release 8051), -p (pins)
 //
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +29,7 @@
 #define VR_STAT     0x40        // USB vendor request: get device info and status
 #define VR_START    0x44        // USB vendor request: start bulk transfer
 #define VR_IFCLK    0x47        // USB vendor request: IFCLK source (0:ext,1:int)
+#define VR_PINS     0x48        // USB vendor request: read PA, PB, RDY pin levels
 #define VR_BOOT     0x4F        // USB vendor request: release 8051 for F/W reload
 #define VR_TYPE     (LIBUSB_RECIPIENT_DEVICE | LIBUSB_REQUEST_TYPE_VENDOR | \
                      LIBUSB_ENDPOINT_OUT)
@@ -53,12 +54,13 @@ static int n_acc = 0;           // samples in accumulator
 static unsigned char obuf[SIZE_XFER]; // output buffer
 
 static const char *usage =
-    "usage: " PROG_NAME " [-t sec] [-r | -i] [-q] [-s | -x | -B] [file]\n"
+    "usage: " PROG_NAME " [-t sec] [-r | -i] [-q] [-s | -p | -x | -B] [file]\n"
     "  -t sec  capture time in seconds (default: 0 = until Ctrl-C)\n"
     "  -r      raw output, 1 byte/sample (bit2=SIGN,bit1=MAGH,bit0=MAGL)\n"
     "  -i      int8 output, 1 byte/sample (+1,+3,-1,-3)\n"
     "  -q      suppress status output\n"
     "  -s      print device/FIFO status and exit (shows if IFCLK edges arrive)\n"
+    "  -p      print PA/PB/RDY pin levels and check straps (needs no clock)\n"
     "  -x      self-test: use FX2LP internal 48MHz IFCLK (disconnect ADC CLK!)\n"
     "  -B      release 8051 so F/W can be reloaded without jumpers, then exit\n"
     "  file    output file (default: fe_dump.bin, '-': stdout)\n";
@@ -133,6 +135,41 @@ static int print_status(libusb_device_handle *h)
     return 0;
 }
 
+// print pin levels and check straps ------------------------------------------
+static int print_pins(libusb_device_handle *h)
+{
+    static const struct {const char *name; int port, bit, expect;} chk[] = {
+        {"RDY0 (SLRD)",      2, 0, 1}, {"RDY1 (SLWR)",      2, 1, 0},
+        {"PA2  (SLOE)",      0, 2, 1}, {"PA4  (FIFOADR0)",  0, 4, 0},
+        {"PA5  (FIFOADR1)",  0, 5, 1}, {"PA6  (PKTEND)",    0, 6, 1}
+    };
+    unsigned char b[6] = {0}, hi = 0, lo = 0xFF;
+    int i, n, bad = 0;
+    
+    for (n = 0; n < 50; n++) {
+        if (libusb_control_transfer(h, VR_TYPE_IN, VR_PINS, 0, 0, b, 6, 1000) < 6) {
+            fprintf(stderr, "pin read error (needs F/W 1.2 or later)\n");
+            return 1;
+        }
+        hi |= b[4];
+        lo &= b[4];
+    }
+    printf("%-18s expect  read\n", "strap");
+    for (i = 0; i < 6; i++) {
+        int v = (b[3 + chk[i].port] >> chk[i].bit) & 1;
+        printf("%-18s %d       %d  %s\n", chk[i].name, chk[i].expect, v,
+            v == chk[i].expect ? "OK" : "BAD");
+        bad += v != chk[i].expect;
+    }
+    printf("\nPB (data) bits over 50 reads: 7..0 = ");
+    for (i = 7; i >= 0; i--) {
+        printf("%c", !((hi >> i) & 1) ? '0' : ((lo >> i) & 1) ? '1' : 'T');
+    }
+    printf("   (0=stuck low, 1=stuck high, T=toggling)\n"
+           "SIGN=PB2, MAGH=PB1, MAGL=PB0. Unused PB3-PB7 should be 0.\n");
+    return bad ? 2 : 0;
+}
+
 // main ------------------------------------------------------------------------
 int main(int argc, char **argv)
 {
@@ -142,7 +179,7 @@ int main(int argc, char **argv)
     struct timeval tv = {0, 100000};
     const char *file = "fe_dump.bin";
     double tmax = 0.0;
-    int i, ret = 1, quiet = 0, status = 0, selftest = 0, boot = 0;
+    int i, ret = 1, quiet = 0, status = 0, selftest = 0, boot = 0, pins = 0;
     time_t t0, t1 = 0;
     long long n_prev = 0;
 
@@ -152,6 +189,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-i")) fmt = FMT_INT8;
         else if (!strcmp(argv[i], "-q")) quiet = 1;
         else if (!strcmp(argv[i], "-s")) status = 1;
+        else if (!strcmp(argv[i], "-p")) pins = 1;
         else if (!strcmp(argv[i], "-x")) selftest = 1;
         else if (!strcmp(argv[i], "-B")) boot = 1;
         else if (argv[i][0] == '-' && argv[i][1]) {
@@ -160,7 +198,7 @@ int main(int argc, char **argv)
         }
         else file = argv[i];
     }
-    if (status || boot) file = NULL;
+    if (status || boot || pins) file = NULL;
     if (!file) {
         fp_out = NULL;
     }
@@ -189,6 +227,10 @@ int main(int argc, char **argv)
     }
     if (status) {
         ret = print_status(h);
+        goto exit;
+    }
+    if (pins) {
+        ret = print_pins(h);
         goto exit;
     }
     if (boot) {

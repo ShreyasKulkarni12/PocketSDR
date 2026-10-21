@@ -221,13 +221,19 @@ x = np.array([1, 3, -1, -3], dtype=np.int8)[s]   # int8 samples
    means the chip sees no IFCLK edges: check clock wire on IFCLK, common GND,
    RDY1 to GND, RDY0/PA2/PA5/PA6 to 3.3 V, PA4 to GND, clock level >= 2 V,
    frequency 5-48 MHz.
-2. Self-test: disconnect ADC CLK wire from IFCLK, then `./fe_dump -x -t 2 t.bin`.
+2. `./fe_dump -p` (F/W 1.2 or later) reads the chip's own pins and checks the
+   straps without a multimeter or a clock: RDY0=1, RDY1=0, PA2=1, PA4=0,
+   PA5=1, PA6=1. Any `BAD` line is a wiring or ground problem (a strap tied
+   to a GND that is not joined to the board GND reads as BAD). It also shows
+   PB bits: SIGN (PB2) and MAGH (PB1) show `T` (toggling) when the frontend
+   drives them; PB3-PB7 should read 0.
+3. Self-test: disconnect ADC CLK wire from IFCLK, then `./fe_dump -x -t 2 t.bin`.
    The FX2LP drives its own 48 MHz onto IFCLK pin, data flows if USB, FIFO
    and straps are right (rate 30-40 MB/s, samples are bus noise). IFCLK is
    restored to external on exit. Never run `-x` with ADC CLK connected.
-3. After self-test passes, reconnect ADC CLK and repeat step 1.
+4. After self-test passes, reconnect ADC CLK and repeat step 1.
 
-F/W 1.1 or later is needed for `-s`, `-x` and `-B`. `./fe_dump -B` releases the
+F/W 1.1 or later is needed for `-s`, `-x` and `-B`, 1.2 for `-p`. `./fe_dump -B` releases the
 8051 so F/W can be reloaded without touching jumpers:
 ```
 ./fe_dump -B
@@ -247,6 +253,7 @@ Firmware starts streaming at power-up; requests not needed.
 | Start bulk transfer | 0x44 | OUT | - (also resets EP6 FIFO)                 |
 | Stop bulk transfer  | 0x45 | OUT | -                                        |
 | Reset device        | 0x46 | OUT | -                                        |
+| Read pin levels     | 0x48 | IN  | 6 B: PA, PB, RDY (slave mode), PA, PB, RDY (port mode) |
 | IFCLK source        | 0x47 | OUT | wValue 0: external (ADC CLK), 1: internal 48 MHz on IFCLK pin (self-test) |
 | Release 8051        | 0x4F | OUT | - (device re-enumerates; `fx2tool` can reload F/W, no jumpers) |
 
